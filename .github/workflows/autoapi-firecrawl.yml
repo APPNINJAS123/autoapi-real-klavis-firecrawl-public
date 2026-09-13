@@ -1,0 +1,96 @@
+name: AutoAPI Firecrawl migration
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_base_sha:
+        description: Exact reviewed base commit to certify
+        required: true
+        type: string
+  pull_request:
+    paths:
+      - 'mcp_servers/firecrawl/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-migration-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Check out the exact reviewed revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.expected_base_sha || github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact checkout and immutable acceptance boundary
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EXPECTED_HEAD_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.expected_base_sha || github.event.pull_request.head.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          REVIEWED_PARENT_SHA: 7f6a46dd1a062b3b4d7b964d2add4f2d7a8c0e55
+        run: |
+          set -euo pipefail
+          case "${EXPECTED_HEAD_SHA}" in
+            *[!0-9a-f]*|'') echo "expected head must be lowercase hexadecimal" >&2; exit 2 ;;
+          esac
+          test "${#EXPECTED_HEAD_SHA}" -eq 40
+          test "$(git rev-parse HEAD)" = "${EXPECTED_HEAD_SHA}"
+          test -z "$(git status --porcelain)"
+          if test "${EVENT_NAME}" = workflow_dispatch; then
+            test "${GITHUB_SHA}" = "${EXPECTED_HEAD_SHA}"
+            test "$(git rev-parse HEAD^)" = "${REVIEWED_PARENT_SHA}"
+            test "$(git diff --name-only HEAD^ HEAD | sort)" = "$(printf '%s\n' .github/workflows/autoapi-firecrawl.yml AUTOAPI_PROVENANCE.md | sort)"
+            test "$(git rev-parse HEAD:mcp_servers/firecrawl/index.ts)" = 1685747c1dfcea6b0e2b1fcd85f736c8d0640db4
+            test "$(git rev-parse HEAD:mcp_servers/firecrawl/package.json)" = df80896b1c30b50d276574f40602ec361c619e41
+            test "$(git rev-parse HEAD:mcp_servers/firecrawl/package-lock.json)" = bf869a4b53a23c8e523436e4b67eadc7764baead
+            test "$(git rev-parse HEAD:scripts/verify-firecrawl-generation.mjs)" = 09af642bb8f43ee4d6d0ffae049da38ad79c8f94
+          else
+            case "${PR_BASE_SHA}" in
+              *[!0-9a-f]*|'') echo "pull-request base must be lowercase hexadecimal" >&2; exit 2 ;;
+            esac
+            test "${#PR_BASE_SHA}" -eq 40
+            git merge-base --is-ancestor "${REVIEWED_PARENT_SHA}" "${PR_BASE_SHA}"
+            git diff --exit-code "${PR_BASE_SHA}" -- \
+              .github/workflows/autoapi-firecrawl.yml \
+              AUTOAPI_PROVENANCE.md \
+              scripts/verify-firecrawl-generation.mjs
+            changed="$(git diff --name-only "${PR_BASE_SHA}" HEAD)"
+            count="$(printf '%s\n' "${changed}" | sed '/^$/d' | wc -l | tr -d ' ')"
+            test "${count}" -ge 2
+            test "${count}" -le 3
+            printf '%s\n' "${changed}" | grep -Fxq mcp_servers/firecrawl/package.json
+            printf '%s\n' "${changed}" | grep -Fxq mcp_servers/firecrawl/package-lock.json
+            while IFS= read -r changed_file; do
+              case "${changed_file}" in
+                mcp_servers/firecrawl/index.ts|mcp_servers/firecrawl/package.json|mcp_servers/firecrawl/package-lock.json) ;;
+                *) echo "unexpected migration path: ${changed_file}" >&2; exit 2 ;;
+              esac
+            done <<<"${changed}"
+          fi
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.8.0'
+          cache: npm
+          cache-dependency-path: mcp_servers/firecrawl/package-lock.json
+      - name: Install exact dependencies
+        working-directory: mcp_servers/firecrawl
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Compile complete Firecrawl server
+        working-directory: mcp_servers/firecrawl
+        run: npm run build
+      - name: Verify exact baseline or reviewed v2 migration contract
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if test "${EVENT_NAME}" = workflow_dispatch; then
+            node -e 'const fs=require("node:fs");const p=JSON.parse(fs.readFileSync("mcp_servers/firecrawl/package.json"));const l=JSON.parse(fs.readFileSync("mcp_servers/firecrawl/package-lock.json"));const s=fs.readFileSync("mcp_servers/firecrawl/index.ts","utf8");if(p.dependencies?.["@mendable/firecrawl-js"]!=="^1.19.0")throw new Error("unexpected baseline manifest");if(l.packages?.[""]?.dependencies?.["@mendable/firecrawl-js"]!=="^1.19.0"||l.packages?.["node_modules/@mendable/firecrawl-js"]?.version!=="1.22.0")throw new Error("unexpected baseline lock");for(const member of ["scrapeUrl","mapUrl","asyncCrawlUrl"])if(!s.includes(`.${member}(`))throw new Error(`missing baseline member ${member}`)'
+          else
+            node scripts/verify-firecrawl-generation.mjs
+          fi
