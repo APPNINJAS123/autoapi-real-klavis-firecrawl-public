@@ -32,7 +32,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           EXPECTED_HEAD_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.expected_base_sha || github.event.pull_request.head.sha }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          REVIEWED_PARENT_SHA: 7f6a46dd1a062b3b4d7b964d2add4f2d7a8c0e55
+          SANITIZED_ROOT_SHA: 4453816f2cee2ba4e8ac49eeaa7da94d6a2455a6
         run: |
           set -euo pipefail
           case "${EXPECTED_HEAD_SHA}" in
@@ -43,22 +43,37 @@ jobs:
           test -z "$(git status --porcelain)"
           if test "${EVENT_NAME}" = workflow_dispatch; then
             test "${GITHUB_SHA}" = "${EXPECTED_HEAD_SHA}"
-            test "$(git rev-parse HEAD^)" = "${REVIEWED_PARENT_SHA}"
+            test "$(git rev-parse HEAD^)" = "${SANITIZED_ROOT_SHA}"
             test "$(git diff --name-only HEAD^ HEAD | sort)" = "$(printf '%s\n' .github/workflows/autoapi-firecrawl.yml AUTOAPI_PROVENANCE.md | sort)"
+            test "$(git rev-parse HEAD:LICENSE)" = 261eeb9e9f8b2b4b0d119366dda99c6fd7d35c64
             test "$(git rev-parse HEAD:mcp_servers/firecrawl/index.ts)" = 1685747c1dfcea6b0e2b1fcd85f736c8d0640db4
             test "$(git rev-parse HEAD:mcp_servers/firecrawl/package.json)" = df80896b1c30b50d276574f40602ec361c619e41
             test "$(git rev-parse HEAD:mcp_servers/firecrawl/package-lock.json)" = bf869a4b53a23c8e523436e4b67eadc7764baead
             test "$(git rev-parse HEAD:scripts/verify-firecrawl-generation.mjs)" = 09af642bb8f43ee4d6d0ffae049da38ad79c8f94
+            test "$(git rev-parse HEAD:mcp_servers/slack_atlas/slack_mcp_eval_export/all-dumle-servers/2025-12-01.json)" = c7178ffb1125dce807f2bf9fcbeeb381dfd4f605
+            test "$(git rev-parse HEAD:mcp_servers/slack_atlas/slack_mcp_eval_export/social/2025-12-01.json)" = 0ca214bf62245f51df269c9a75b8721194c54ed7
+            test "$(git rev-parse HEAD:mcp_servers/slack_atlas/slack_mcp_eval_export/canvases.json)" = b8815d579f138c5cf0769e859ce3e6a66235ac36
+            if git grep -E 'token=xoxe-' HEAD -- \
+              mcp_servers/slack_atlas/slack_mcp_eval_export/all-dumle-servers/2025-12-01.json \
+              mcp_servers/slack_atlas/slack_mcp_eval_export/social/2025-12-01.json \
+              mcp_servers/slack_atlas/slack_mcp_eval_export/canvases.json; then
+              echo "sanitized public fixture contains a forbidden Slack file token" >&2
+              exit 2
+            fi
           else
             case "${PR_BASE_SHA}" in
               *[!0-9a-f]*|'') echo "pull-request base must be lowercase hexadecimal" >&2; exit 2 ;;
             esac
             test "${#PR_BASE_SHA}" -eq 40
-            git merge-base --is-ancestor "${REVIEWED_PARENT_SHA}" "${PR_BASE_SHA}"
+            git merge-base --is-ancestor "${SANITIZED_ROOT_SHA}" "${PR_BASE_SHA}"
             git diff --exit-code "${PR_BASE_SHA}" -- \
               .github/workflows/autoapi-firecrawl.yml \
               AUTOAPI_PROVENANCE.md \
-              scripts/verify-firecrawl-generation.mjs
+              LICENSE \
+              scripts/verify-firecrawl-generation.mjs \
+              mcp_servers/slack_atlas/slack_mcp_eval_export/all-dumle-servers/2025-12-01.json \
+              mcp_servers/slack_atlas/slack_mcp_eval_export/social/2025-12-01.json \
+              mcp_servers/slack_atlas/slack_mcp_eval_export/canvases.json
             changed="$(git diff --name-only "${PR_BASE_SHA}" HEAD)"
             count="$(printf '%s\n' "${changed}" | sed '/^$/d' | wc -l | tr -d ' ')"
             test "${count}" -ge 2
